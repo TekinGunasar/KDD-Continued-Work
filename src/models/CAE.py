@@ -1,9 +1,9 @@
 import tensorflow as tf
 
 from tensorflow.keras import Sequential
-from tensorflow.keras.layers import Conv1D,Conv2D,Dense,Reshape,BatchNormalization,InputLayer,Flatten,Dropout,LeakyReLU,ReLU,MaxPooling2D,MaxPooling1D
+from tensorflow.keras.layers import Conv1D,Conv2D,Dense,Reshape,BatchNormalization,InputLayer,Flatten,Dropout,LeakyReLU,ReLU,MaxPooling2D,MaxPooling1D,Conv1DTranspose,Conv2DTranspose
 from tensorflow.keras import losses,optimizers
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler,StandardScaler
 
 from math import ceil,floor
 import numpy as np
@@ -53,16 +53,16 @@ class ConvolutionalAutoEncoder:
         self.parse_dataset()
 
     
-    def parse_dataset(self,normalize=True):
+    def parse_dataset(self,scaler = StandardScaler()):
         data_dict = load_dataset(self.dataset_path)
 
-        self.training_trials = normalize_data(data_dict['training']['trials'])
+        self.training_trials = normalize_data(data_dict['training']['trials'],scaler)
         self.training_labels = data_dict['training']['labels']
 
-        self.validation_trials = normalize_data(data_dict['validation']['trials'])
+        self.validation_trials = normalize_data(data_dict['validation']['trials'],scaler)
         self.validation_labels = data_dict['validation']['labels']
 
-        self.testing_trials = normalize_data(data_dict['testing']['trials'])
+        self.testing_trials = normalize_data(data_dict['testing']['trials'],scaler)
         self.testing_labels = data_dict['testing']['labels']
         
 
@@ -120,21 +120,15 @@ class ConvolutionalAutoEncoder:
         self.encoder.add(Conv2D(
             filters = self.TRAINING_SETTINGS['NUM_INITIAL_KERNELS'],
             kernel_size = (self.DATA_FORMAT['NUM_CHANNELS'],self.TRAINING_SETTINGS['KERNEL_WIDTH']),
-            strides = (1,stride_length),
-        ))
-
-        self.encoder.add(MaxPooling2D(
-            pool_size = (stride_length,stride_length),
-            padding = 'same'
+            strides = (stride_length,stride_length)
         ))
 
         self.spatial_conv_output_shape = (
-                (floor((self.DATA_FORMAT['TRIAL_LENGTH'] - self.TRAINING_SETTINGS['KERNEL_WIDTH']) / stride_length)+1)//stride_length,
+                (floor((self.DATA_FORMAT['TRIAL_LENGTH'] - self.TRAINING_SETTINGS['KERNEL_WIDTH']) / stride_length)+1),
                 self.TRAINING_SETTINGS['NUM_INITIAL_KERNELS']
         )
         
         self.encoder.add(Reshape(target_shape =  self.spatial_conv_output_shape))
-        self.encoder.add(BatchNormalization())
         self.encoder.add(LeakyReLU())
 
        
@@ -149,64 +143,65 @@ class ConvolutionalAutoEncoder:
             groups = self.TRAINING_SETTINGS['NUM_INITIAL_KERNELS']
         ))
 
-        self.encoder.add(MaxPooling1D(
-            pool_size = stride_length,
-            padding='same'
-         ))
-
         self.temporal_conv_output_shape = (
-            (floor((self.spatial_conv_output_shape[0] - self.TRAINING_SETTINGS['KERNEL_WIDTH']) / stride_length) + 1)//stride_length,
+            (floor((self.spatial_conv_output_shape[0] - self.TRAINING_SETTINGS['KERNEL_WIDTH']) / stride_length) + 1),
             self.TRAINING_SETTINGS['NUM_INITIAL_KERNELS'] * 2
         )
 
         self.encoder.add(Reshape(target_shape = self.temporal_conv_output_shape))
-        self.encoder.add(BatchNormalization())
         self.encoder.add(LeakyReLU())
         
         #FC layers - start
 
         self.encoder.add(Flatten())
-        self.encoder.add(Dense(self.TRAINING_SETTINGS['LATENT_DIMS'],activation='linear'))
-        self.encoder.add(Dropout(rate = self.TRAINING_SETTINGS['DROPOUT_RATE']))
-
+        self.encoder.add(Dense(self.TRAINING_SETTINGS['LATENT_DIMS'],activation='tanh'))
         
         #Fully connected layer - end
 
         
         if show_summary:
             print(self.encoder.summary())
-            print(f'When considering dropout, parameter count during training is ~{self.get_effective_parameter_count()}')
-
 
     def build_decoder(self,show_summary = False):
 
+        stride_length = self.TRAINING_SETTINGS['STRIDE_LENGTH']
         self.decoder = Sequential()
-        
-        input_shape = (self.TRAINING_SETTINGS['LATENT_DIMS'])
+
+        #Going from latent space to FC layer 
+        input_shape = (1,self.TRAINING_SETTINGS['LATENT_DIMS'])
         output_shape = self.DATA_FORMAT['TRIAL_LENGTH'] * self.DATA_FORMAT['NUM_CHANNELS']
 
         self.decoder.add(InputLayer(input_shape = input_shape))
-        self.decoder.add(BatchNormalization())
-        
+
         self.decoder.add(Dense(
-            output_shape,activation = 'tanh'    
+            self.temporal_conv_output_shape[0] * self.temporal_conv_output_shape[1],activation='tanh'
         ))
 
-        self.decoder.add(Dropout(rate = self.TRAINING_SETTINGS['DROPOUT_RATE']))
+        self.decoder.add(Reshape(
+            target_shape = self.temporal_conv_output_shape
+        ))
+        
+        self.decoder.add(Conv1DTranspose(
+            filters = self.TRAINING_SETTINGS['NUM_INITIAL_KERNELS'],
+            kernel_size = self.TRAINING_SETTINGS['KERNEL_WIDTH'],
+            strides = stride_length,
+        ))
+
+        self.decoder.add(Reshape(
+            target_shape = [1] + list(self.spatial_conv_output_shape) 
+        ))
+
+        self.decoder.add(Conv2DTranspose(
+            filters = 1,
+            kernel_size = (self.DATA_FORMAT['NUM_CHANNELS'],self.TRAINING_SETTINGS['KERNEL_WIDTH']),
+            strides = (stride_length,stride_length),
+        ))
 
         self.decoder.add(Reshape(
             target_shape = (self.DATA_FORMAT['NUM_CHANNELS'],self.DATA_FORMAT['TRIAL_LENGTH'])
         ))
 
-        if show_summary:
-            print(self.decoder.summary())
-    
-            num_params = self.decoder.count_params()
-            with_dropout_params = floor((1-self.TRAINING_SETTINGS['DROPOUT_RATE']) * num_params)
-    
-            print(f'When considering dropout, parameter count during training is {with_dropout_params}')
         
-
     def build_auto_encoder(self,show_summary=False):
 
         self.build_encoder()
@@ -231,12 +226,7 @@ class ConvolutionalAutoEncoder:
                 print(f'Error when trying to add {layer} at index {i}')
 
         if show_summary:
-            num_encoder_params = self.get_effective_parameter_count()
-            num_decoder_params = floor((1-self.TRAINING_SETTINGS['DROPOUT_RATE']) * self.decoder.count_params())
-            total_params = num_encoder_params + num_decoder_params 
-
             print(self.auto_encoder.summary())
-            print(f'When considering drop out, the total number of parameters is {total_params}')
 
     def compile_auto_encoder(self,loss,optimizer):
 
@@ -442,11 +432,9 @@ class ConvolutionalAutoEncoder:
         ''' considers parameter count during training when drop out is applied as well'''
         total_num_params = self.encoder.count_params()
 
-        num_dense_connections = 2 * self.temporal_conv_output_shape[0] * self.temporal_conv_output_shape[1]
-        n_dense_w_dropout = num_dense_connections - int(self.TRAINING_SETTINGS['DROPOUT_RATE'] * num_dense_connections)
-        param_diff = num_dense_connections - n_dense_w_dropout
-
-        num_param_dropout = total_num_params - param_diff
+        num_dense_connections = self.temporal_conv_output_shape[0] * self.temporal_conv_output_shape[1]*8
+        print(num_dense_connections)
+        
 
         return num_param_dropout
         

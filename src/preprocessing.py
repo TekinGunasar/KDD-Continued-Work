@@ -1,11 +1,12 @@
 from scipy.signal import periodogram
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler,StandardScaler
 import tensorflow as tf
 import numpy as np
 
 import matplotlib.pyplot as plt
 
 from scipy.interpolate import CubicSpline
+from sklearn.decomposition import PCA
 
 
 #These assume C3,C4 channel set up
@@ -46,16 +47,22 @@ def zoom_into_psd(psd,zoom_range=(8,13),plot=False,return_data=False):
     plt.legend(['C3','C4'])
     
     
-    
-def normalize_data(trials):
 
+def flatten_trials(trials):
     num_channels,trial_length = trials.shape[1],trials.shape[2]
     flattened_trials = np.reshape(trials,[len(trials),num_channels*trial_length])
+    
+    return flattened_trials
 
-    normalized_trials = MinMaxScaler().fit_transform(flattened_trials)
+def normalize_data(trials,scaler):
+    num_channels,trial_length = trials.shape[1],trials.shape[2]
+    flattened_trials = flatten_trials(trials)
+
+    normalized_trials = scaler.fit_transform(flattened_trials)
     reformatted_trials = np.reshape(normalized_trials,[len(trials),num_channels,trial_length])
 
     return reformatted_trials
+
 
 def create_tf_dataset(trials,labels=None,batch = False,batch_size = None,include_labels=False):
 
