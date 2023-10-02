@@ -1,7 +1,7 @@
 from tensorflow.keras.models import load_model
 from tensorflow.keras.models import Sequential
 
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder,StandardScaler
 from sklearn.metrics import accuracy_score
 from sklearn.cluster import KMeans
 
@@ -22,18 +22,22 @@ class DeepEmbeddedClustering():
     #Experiment directory passed in assumes that there is already a pre-trained auto-encoder there. 
     def __init__(self,dataset_path,TRAINING_SETTINGS_JSON,experiment_dir):
 
+        self.save_results_to = os.path.join(experiment_dir,'DEC Training Results')
+        if not os.path.isdir(self.save_results_to):
+            print(f'Creating directory where DEC results will be saved in {self.save_results_to}')
+            os.makedirs(self.save_results_to,exist_ok=True)
         
         #clearing training history to make sure loss from other experiments is not included in subsequent experimens
-        self.training_history = {
-                'training_metrics':{
-                    'BCE':[],
-                    'accuracy':[]
-                },
-                'validation_metrics':{
-                    'BCE':[],
-                    'accuracy':[]
-                }
+        self.history = {
+            'loss': {
+                'training':[],
+                'validation':[]
+            },
+            'accuracy': {
+                'training':[],
+                'validation':[]
             }
+        }
 
         self.dataset_path = dataset_path
         self.experiment_dir = experiment_dir
@@ -51,18 +55,18 @@ class DeepEmbeddedClustering():
 
         self.parse_dataset()
 
+
     
-    
-    def parse_dataset(self,normalize=True):
+    def parse_dataset(self,normalize=True,scaler=StandardScaler()):
         data_dict = load_dataset(self.dataset_path)
 
-        self.training_trials = normalize_data(data_dict['training']['trials'])
+        self.training_trials = normalize_data(data_dict['training']['trials'],scaler)
         self.training_labels = LabelEncoder().fit_transform(data_dict['training']['labels'])
 
-        self.validation_trials = normalize_data(data_dict['validation']['trials'])
+        self.validation_trials = normalize_data(data_dict['validation']['trials'],scaler)
         self.validation_labels = LabelEncoder().fit_transform(data_dict['validation']['labels'])
 
-        self.testing_trials = normalize_data(data_dict['testing']['trials'])
+        self.testing_trials = normalize_data(data_dict['testing']['trials'],scaler)
         self.testing_labels = LabelEncoder().fit_transform(data_dict['testing']['labels'])
         
 
@@ -71,8 +75,6 @@ class DeepEmbeddedClustering():
         auto_encoder_path = os.path.join(self.experiment_dir,auto_encoder_name)
         self.auto_encoder = load_model(auto_encoder_path)
 
-
-    
     
     def extract_encoder(self):
         encoder_idx = len(self.auto_encoder.layers) // 2 + 1
@@ -113,6 +115,8 @@ class DeepEmbeddedClustering():
     def compile_encoder(self,loss,optimizer):
         self.loss = loss
         self.optimizer = optimizer
+        self.optimizer.lr = self.TRAINING_SETTINGS['learning_rate']
+        
         self.encoder.compile(loss = self.loss,optimizer = self.optimizer)
 
     
@@ -123,7 +127,7 @@ class DeepEmbeddedClustering():
     
         # Compute the t-distribution kernel
         kernel = tf.pow(1 + pairwise_distances / alpha, -(alpha + 1) / 2)
-        kernel = kernel / tf.reduce_sum(kernel, axis=-1, keepdims=True)
+        kernel = kernel / (tf.reduce_sum(kernel, axis=-1, keepdims=True) - kernel)
     
         return kernel
 
@@ -137,7 +141,7 @@ class DeepEmbeddedClustering():
 
 
     #cm = cluster membership
-    def get_acc_by_cm(self,embeddings,cluster_centers,labels,):
+    def get_acc_by_cm(self,embeddings,cluster_centers,labels):
         soft_assignments = self.soft_assignments(embeddings,cluster_centers)
         predicted_labels = tf.math.argmax(soft_assignments,axis=-1).numpy()
         
@@ -146,17 +150,46 @@ class DeepEmbeddedClustering():
         return acc
 
     
-    #accuracy and KL Divergence
-    def evaluate_validation_metrics(self):
+    def evaluate_training_loss(self):
+        training_embeddings = self.get_embeddings(self.training_trials)
+        
+        soft_assignments = self.soft_assignments(training_embeddings,self.cluster_centers)
+        target_distribution = self.target_distribution(soft_assignments)
+        
+        training_kld = self.loss(soft_assignments,target_distribution)
+        
+        return training_kld
+
+    
+    def evaluate_validation_loss(self):
         validation_embeddings = self.get_embeddings(self.validation_trials)
         
         soft_assignments = self.soft_assignments(validation_embeddings,self.cluster_centers)
         target_distribution = self.target_distribution(soft_assignments)
         
         val_kld = self.loss(soft_assignments,target_distribution)
-        val_acc = self.get_acc_by_cm(validation_embeddings,self.cluster_centers.numpy(),self.validation_labels)
         
-        return val_kld,val_acc
+        return val_kld
+
+    def evaluate_training_accuracy(self):
+        training_embeddings = self.get_embeddings(self.training_trials)
+        
+        soft_assignments = self.soft_assignments(training_embeddings,self.cluster_centers)
+        target_distribution = self.target_distribution(soft_assignments)
+        
+        train_acc = self.get_acc_by_cm(training_embeddings,self.cluster_centers,self.training_labels)
+        
+        return train_acc
+
+    def evaluate_validation_accuracy(self):
+        validation_embeddings = self.get_embeddings(self.validation_trials)
+        
+        soft_assignments = self.soft_assignments(validation_embeddings,self.cluster_centers)
+        target_distribution = self.target_distribution(soft_assignments)
+        
+        val_acc = self.get_acc_by_cm(validation_embeddings,self.cluster_centers,self.validation_labels)
+        
+        return val_acc
 
     
     def train_step(self,x_batch_train,y_batch_train):
@@ -175,30 +208,9 @@ class DeepEmbeddedClustering():
         grad_encoder_params = tape.gradient(loss,self.encoder.trainable_weights)
         grad_cluster_centers = tape.gradient(loss,self.cluster_centers)
 
-        if bool(self.TRAINING_SETTINGS['CLIP_GRADIENTS']):
-            clip_threshold = self.TRAINING_SETTINGS['CLIP_VALUE']
-
-            grad_cluster_centers = [grad_cluster_centers[0],grad_cluster_centers[1]]
-            
-            clipped_encoder_gradients, _ = tf.clip_by_global_norm(grad_encoder_params, clip_norm=clip_threshold)
-            clipped_cc_gradients, _ = tf.clip_by_global_norm(grad_cluster_centers, clip_norm=clip_threshold)
-             
-            grad_encoder_params = clipped_encoder_gradients
-            grad_cluster_centers = clipped_cc_gradients
-
-                
         self.optimizer.apply_gradients(zip(grad_encoder_params,self.encoder.trainable_weights))
-        self.cluster_centers = tf.subtract(self.cluster_centers,self.optimizer.lr * grad_cluster_centers) 
+        self.cluster_centers -= self.optimizer.lr * self.cluster_centers
         
-        train_acc = self.get_acc_by_cm(cur_embeddings,self.cluster_centers.numpy(),y_batch_train)
-        val_kld, val_acc = self.evaluate_validation_metrics()
-
-        self.training_history['training_metrics']['BCE'].append(loss.numpy())
-        self.training_history['validation_metrics']['BCE'].append(val_kld.numpy())
-
-        self.training_history['training_metrics']['accuracy'].append(train_acc)
-        self.training_history['validation_metrics']['accuracy'].append(val_acc)
-
             
     def train(self,save_experiment = False,model_name = None):
         
@@ -218,56 +230,61 @@ class DeepEmbeddedClustering():
         
         for epoch in range(num_epochs):
             
-            epoch_progress = tqdm(total=len(self.training_trials), unit=' training examples', position=0, leave=False)
+            epoch_progress = tqdm(total=len(range(steps_per_epoch)), unit=' batch', position=0, leave=False)
             epoch_progress.set_description(desc=f'Epoch {epoch + 1} / {num_epochs}') 
             
             for step,(x_batch_train,y_batch_train) in enumerate(train_trials_as_tf_dataset):    
                 self.train_step(x_batch_train,y_batch_train)
-                epoch_progress.update(self.TRAINING_SETTINGS['BATCH_SIZE'])
+                epoch_progress.update(1)
 
-            embeddings = self.encoder(self.training_trials)
-            soft_assignments = self.soft_assignments(embeddings,self.cluster_centers)
-            target_distribution = self.target_distribution(soft_assignments)
-        
-            val_loss,val_acc = self.evaluate_validation_metrics()
+           
+            validation_loss = self.evaluate_validation_loss()
+            self.history['loss']['validation'].append(validation_loss)
             
-            train_acc = self.get_acc_by_cm(embeddings,self.cluster_centers,self.training_labels)
-            train_loss = self.loss(soft_assignments,target_distribution)
+            train_loss = self.evaluate_training_loss()
+            self.history['loss']['training'].append(train_loss)
 
-            print(f'Accuracy metrics - Train: {train_acc} - Validation: {val_acc}')
-            print(f'BCE: - Train {train_loss} - Validation: {val_loss}\n')
-        
-        #creating directory for DEC training results in same directory where the pre-trained auto-encoder is #
-        #DEC_dir = os.path.join(self.experiment)
-    
+            train_acc = self.evaluate_training_accuracy()
+            self.history['accuracy']['training'].append(train_acc)
+
+            val_acc = self.evaluate_validation_accuracy()
+            self.history['accuracy']['validation'].append(train_acc)
+            
+            print(f'Training loss: {train_loss}')
+            print(f'Validation loss: {validation_loss}\n')
+
+            print(f'Training accuracy: {train_acc}')
+            print(f'Validation accuracy: {val_acc}')
+
         self.plot_metrics()
 
+    
     def plot_metrics(self):
-
-        print('For greater ease of interpretation, dividing KL Divergence loss values by 1e-5')
         
-        train_kld,val_kld = self.training_history['training_metrics']['BCE'],self.training_history['validation_metrics']['BCE']
-        train_acc,val_acc = self.training_history['training_metrics']['accuracy'],self.training_history['validation_metrics']['accuracy']
+        fig,axs = plt.subplots(1,2,figsize=(15,4))
 
-        fig,ax = plt.subplots(1,2,figsize=(15,4))
+        axs[0].plot(self.history['loss']['training'])
+        axs[0].plot(self.history['loss']['validation'])
 
-        ax[0].plot(train_kld,alpha=0.4)
-        ax[0].plot(val_kld)
-        ax[0].set_title('Loss Curve for BCE')
-        ax[0].legend(['Training','Validation'])
-        ax[0].set_xlabel('Training Step')
-        ax[0].set_ylabel('BCE(S,P)')
+        axs[0].set_title('Loss Curve (BCE)')
+        axs[0].set_xlabel('Epoch')
+        axs[0].set_ylabel('BCE(S,T)')
 
-        ax[1].plot(train_acc,alpha=0.4)
-        ax[1].plot(val_acc)
-        ax[1].set_title('Training and Validation Accuracy')
-        ax[1].legend(['Training','Validation'])
-        ax[1].set_xlabel('Training Step')
-        ax[1].set_ylabel('Accuracy by Cluster Membership')
+        axs[0].legend(['Training','Validation'])
 
 
+        
+        axs[1].plot(self.history['accuracy']['training'])
+        axs[1].plot(self.history['accuracy']['validation'])
+        
+        axs[1].set_title('Accuracy Curve')
+        
+        axs[1].set_xlabel('Epoch')
+        axs[1].set_ylabel('Accuracy')
 
+        axs[1].legend(['Training','Validation'])
 
+        
 
 
 

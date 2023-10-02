@@ -5,14 +5,13 @@
   },
   "TRAINING_SETTINGS": {
     "KERNEL_WIDTH": 16,
-    "LATENT_DIMS": 8,
-    "learning_rate": 1e-5,
-    "NUM_AUTO_ENCODER_LAYERS": 2,
+    "LATENT_DIMS": 32,
+    "learning_rate": 1e-4,
     "NUM_INITIAL_KERNELS": 8,
     "DROPOUT_RATE": 0.8,
     "STRIDE_LENGTH": 2,
-    "BATCH_SIZE":32,
-    "NUM_EPOCHS":30,
+    "BATCH_SIZE":128,
+    "NUM_EPOCHS":100,
     "CLIP_GRADIENTS":"False"
   }
 }

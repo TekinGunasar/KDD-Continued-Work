@@ -30,8 +30,6 @@ class ConvolutionalAutoEncoder:
 
     
     def __init__(self,dataset_path,TRAINING_SETTINGS_JSON):
-
-        self.models_per_epoch = {}
         
         self.history['training_loss'] = []
         self.history['validation_loss'] = []
@@ -249,7 +247,11 @@ class ConvolutionalAutoEncoder:
 
         return validation_loss
 
+    def evaluate_training_loss(self):
+        reconstructed_val_data = self.auto_encoder(self.training_trials)
+        training_loss = self.loss(self.training_trials,reconstructed_val_data).numpy()
 
+        return training_loss
 
     def train_step(self,x_batch_train,current_step):
 
@@ -276,10 +278,6 @@ class ConvolutionalAutoEncoder:
             self.optimizer.learning_rate.assign(cur_lr)
         
         self.optimizer.apply_gradients(zip(gradients,self.auto_encoder.trainable_weights))
-
-        self.history['training_loss'].append(cur_loss.numpy())
-        self.history['validation_loss'].append(self.evaluate_validation_loss())
-
 
     
     def train(self,save_experiment = False,experiment_dir = None,model_name = None):
@@ -319,18 +317,14 @@ class ConvolutionalAutoEncoder:
                 epoch_progress.update(1)
 
             val_loss = self.evaluate_validation_loss()
-            train_loss = self.history['training_loss'][-1]
-            ratio = val_loss / train_loss
-            
-            loss_desc = {
-                'Training Loss':train_loss,
-                'Validation Loss': val_loss,
-                'Ratio': ratio
-            }
-            
-            epoch_progress.set_postfix(loss = loss_desc)
+            train_loss = self.evaluate_training_loss()
 
-            self.models_per_epoch[f'Epoch {epoch}'] = (self.auto_encoder,ratio)
+            print(f'Validation loss: {val_loss}')
+            print(f'Training loss: {train_loss}\n')
+
+            self.history['training_loss'].append(train_loss)
+            self.history['validation_loss'].append(val_loss)
+
 
         if save_experiment:
             self.save_model(experiment_dir,model_name)
@@ -396,7 +390,7 @@ class ConvolutionalAutoEncoder:
         plt.plot(self.history['training_loss'],alpha=0.4)
         plt.plot(self.history['validation_loss'])
 
-        plt.xlabel('Training steps')
+        plt.xlabel('Epoch')
         plt.ylabel('MSE Loss')
 
         plt.title('Loss Curves')
@@ -440,7 +434,7 @@ class ConvolutionalAutoEncoder:
         
     
     #Only doing this for test data
-    def show_random_reconstruction(self):
+    def show_random_reconstruction(self,show_noise=False):
         rand_idx = np.random.randint(low = 0,high = len(self.testing_trials) - 1)
         
         rand_test_trial = self.testing_trials[rand_idx]
@@ -448,9 +442,11 @@ class ConvolutionalAutoEncoder:
 
         rand_test_C3,rand_test_C4 = rand_test_trial[0],rand_test_trial[1]
         reconstructed_C3,reconstructed_C4 = reconstructed_signal[0],reconstructed_signal[1]
+        
+        removed_noise_C3 = reconstructed_C3 - rand_test_C3
+        removed_noise_C4 = reconstructed_C4 - rand_test_C4
 
-        print(tf.linalg.norm(reconstructed_C3).numpy(),tf.linalg.norm(reconstructed_C4).numpy())
-
+        
         fig,axs = plt.subplots(1,2,figsize=(15,4))
 
         axs[0].plot(rand_test_C3)
@@ -462,6 +458,19 @@ class ConvolutionalAutoEncoder:
         axs[1].plot(reconstructed_C4)
         axs[1].set_title('Reconstructed Signal')
         axs[1].legend(['C3','C4'])
+
+        fig_noise_C3,axs_noise_C3 = plt.subplots(1,1,figsize=(10,2))
+        axs_noise_C3.plot(removed_noise_C3)
+        axs_noise_C3.set_title('Removed noise C3')
+
+        fig_noise_C4,axs_noise_C4 = plt.subplots(1,1,figsize=(10,2))
+        axs_noise_C4.plot(removed_noise_C4)
+        axs_noise_C4.set_title('Removed noise C4')
+
+        fig_noise_hist,axs_noise_hist = plt.subplots(1,2,figsize=(15,4))
+        axs_noise_hist[0].hist(removed_noise_C3,bins=15)
+
+        axs_noise_hist[1].hist(removed_noise_C4,bins=15)
 
     def get_training_points_per_param(self):
         num_encoder_params = self.get_effective_parameter_count()

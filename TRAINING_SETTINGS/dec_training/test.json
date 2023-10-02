@@ -1,0 +1,11 @@
+{
+  "DATA_FORMAT": {
+    "NUM_CHANNELS": 2,
+    "TRIAL_LENGTH": 170
+  },
+  "TRAINING_SETTINGS": {
+    "learning_rate": 1e-5,
+    "BATCH_SIZE":128,
+    "NUM_EPOCHS":10
+  }
+}
