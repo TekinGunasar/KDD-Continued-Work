@@ -4,6 +4,7 @@ from tensorflow.keras import Sequential
 from tensorflow.keras.layers import Conv1D,Conv2D,Dense,Reshape,BatchNormalization,InputLayer,Flatten,Dropout,LeakyReLU,ReLU,MaxPooling2D,MaxPooling1D,Conv1DTranspose,Conv2DTranspose
 from tensorflow.keras import losses,optimizers
 from sklearn.preprocessing import MinMaxScaler,StandardScaler
+from sklearn.metrics import accuracy_score
 
 from math import ceil,floor
 import numpy as np
@@ -19,20 +20,25 @@ import json
 from src.preprocessing import *
 from src.dataset_wrappers import *
 
+from sklearn.cluster import KMeans
+
 class ConvolutionalAutoEncoder:
 
     models_per_epoch = {}
     
-    history = {
-        'training_loss':[],
-        'validation_loss':[]
-    }
-
     
     def __init__(self,dataset_path,TRAINING_SETTINGS_JSON):
         
-        self.history['training_loss'] = []
-        self.history['validation_loss'] = []
+        self.history = {
+            'loss': {
+                'training':[],
+                'validation':[]
+            },
+            'accuracy': {
+                'training':[],
+                'validation':[]
+            }
+        }
 
         self.dataset_path = dataset_path
         
@@ -240,18 +246,47 @@ class ConvolutionalAutoEncoder:
 
         if self.has_lrs:
             self.set_lr_scheduler()
+
+
+    def initialize_cluster_centers(self,embedded_data):
+        cluster_centers =  tf.cast(tf.Variable(KMeans(n_clusters=2).fit(embedded_data).cluster_centers_),tf.float32)
+        return cluster_centers
+
+    def soft_assignments(self,embedded_data, cluster_centers, alpha=1):
+        pairwise_distances = tf.reduce_sum(tf.square(embedded_data[:, tf.newaxis] - cluster_centers), axis=-1)
+    
+        kernel = tf.pow(1 + pairwise_distances / alpha, -(alpha + 1) / 2)
+        kernel = kernel / (tf.reduce_sum(kernel, axis=-1, keepdims=True))
+    
+        return kernel
+
+    def evaluate_accuracy(self,data,true_labels):
+
+        embedded_data = self.encoder(data)
+        cluster_centers = self.initialize_cluster_centers(embedded_data)
+        soft_assignments = self.soft_assignments(embedded_data,cluster_centers)
+
+        predicted_labels = tf.math.argmax(soft_assignments,axis=-1).numpy()
         
-    def evaluate_validation_loss(self):
-        reconstructed_val_data = self.auto_encoder(self.validation_trials)
-        validation_loss = self.loss(self.validation_trials,reconstructed_val_data).numpy()
+        acc = accuracy_score(true_labels,predicted_labels)
 
-        return validation_loss
+        return acc
+    
+    def evaluate_entire_dataset_loss(self,dataset):
+        reconstructed_data = self.auto_encoder(dataset)
+        loss = self.loss(dataset,reconstructed_data).numpy()
 
-    def evaluate_training_loss(self):
-        reconstructed_val_data = self.auto_encoder(self.training_trials)
-        training_loss = self.loss(self.training_trials,reconstructed_val_data).numpy()
+        return loss
 
-        return training_loss
+    def update_encoder(self):
+        encoder_idx = len(self.auto_encoder.layers) // 2 + 1
+        encoder_layers = self.auto_encoder.layers[:encoder_idx]
+        
+        self.encoder = Sequential(encoder_layers)
+        input_shape = input_shape = [None,self.DATA_FORMAT['NUM_CHANNELS'],self.DATA_FORMAT['TRIAL_LENGTH'],1]
+
+        self.encoder.build(input_shape = input_shape)
+
 
     def train_step(self,x_batch_train,current_step):
 
@@ -316,23 +351,34 @@ class ConvolutionalAutoEncoder:
 
                 epoch_progress.update(1)
 
-            val_loss = self.evaluate_validation_loss()
-            train_loss = self.evaluate_training_loss()
+            self.update_encoder()
+            
+            val_loss = self.evaluate_entire_dataset_loss(self.validation_trials)
+            train_loss = self.evaluate_entire_dataset_loss(self.training_trials)
 
+            val_acc = self.evaluate_accuracy(self.validation_trials,self.validation_labels)
+            train_acc = self.evaluate_accuracy(self.training_trials,self.training_labels)
+    
             print(f'Validation loss: {val_loss}')
             print(f'Training loss: {train_loss}\n')
 
-            self.history['training_loss'].append(train_loss)
-            self.history['validation_loss'].append(val_loss)
+            print(f'Validation accuracy: {val_acc}')
+            print(f'Training accuracy: {train_acc}\n')
 
+            self.history['loss']['training'].append(train_loss)
+            self.history['loss']['validation'].append(val_loss)
+
+            self.history['accuracy']['training'].append(train_acc)
+            self.history['accuracy']['validation'].append(val_acc)
+            
+        
 
         if save_experiment:
             self.save_model(experiment_dir,model_name)
-            self.evaluate_test_loss()
+            self.evaluate_test_metrics()
             self.save_training_history_json(experiment_dir)
             self.save_training_settings(experiment_dir)
             self.plot_loss_curve(save_figure = True,experiment_dir = experiment_dir,figure_name = 'loss_curve.png')
-
 
 
     def save_model(self,experiment_dir,model_name):
@@ -343,9 +389,12 @@ class ConvolutionalAutoEncoder:
     def save_training_history_json(self,experiment_dir=None,json_name='training_history.json'):
 
         serializable_history = {
-            'training_loss': convert_to_floats(self.history['training_loss']),
-            'validation_loss': convert_to_floats(self.history['validation_loss']),
-            'testing_loss': float(self.history['testing_loss'])
+            'training_loss': convert_to_floats(self.history['loss']['training']),
+            'validation_loss': convert_to_floats(self.history['loss']['validation']),
+            'training_accuracy': self.history['accuracy']['training'],
+            'validation_accuracy': self.history['accuracy']['validation'],
+            'testing_loss': float(self.history['testing_loss']),
+            'testing_accuracy': float(self.history['testing_accuracy'])
         }
 
         serializable_history_json = json.dumps(serializable_history)
@@ -384,19 +433,24 @@ class ConvolutionalAutoEncoder:
 
     def plot_loss_curve(self,experiment_dir=None,save_figure = False,figure_name=None):
 
-        #Assuming for now same num. of points in training and validation loss, which we do here anyways because small dataset size
-        #so not that expensive to get validation loss a lot        
+        fig,axs = plt.subplots(1,2,figsize=(15,4))
 
-        plt.plot(self.history['training_loss'],alpha=0.4)
-        plt.plot(self.history['validation_loss'])
+        axs[0].plot(self.history['loss']['training'],alpha=0.4,lw = 5)
+        axs[0].plot(self.history['loss']['validation'],alpha=0.6,lw = 5)
 
-        plt.xlabel('Epoch')
-        plt.ylabel('MSE Loss')
+        axs[0].set_xlabel('Epoch')
+        axs[0].set_ylabel('MSE Loss')
 
-        plt.title('Loss Curves')
+        axs[0].set_title('Loss Curve')
 
-        plt.legend(['Training Loss','Validation Loss'])
         
+        axs[1].plot(self.history['accuracy']['training'],alpha=0.4,lw = 5)
+        axs[1].plot(self.history['accuracy']['validation'],alpha=0.6,lw = 5)
+
+        axs[1].set_xlabel('Epoch')
+        axs[1].set_ylabel('Accuracy')
+
+        axs[1].set_title('Accuracy Curve')
 
         if save_figure and not experiment_dir:
             print('Please provide an experiment directory to save the figure to')
@@ -409,29 +463,21 @@ class ConvolutionalAutoEncoder:
         figure_path = experiment_dir + '/' + figure_name
 
         plt.savefig(figure_path,format='png')
-        
 
-    def evaluate_test_loss(self):
+    def evaluate_test_metrics(self):
         reconstructed_test_data = self.auto_encoder(self.testing_trials)
         test_mse = self.loss(self.testing_trials,reconstructed_test_data).numpy()
+        test_acc = self.evaluate_accuracy(self.testing_trials,self.testing_labels)
 
-        print('Adding test loss to training history...')
+        print('Adding test loss and test accuracy to training history...')
         print(f'Test loss is {test_mse}')
+        print(f'Test accuracy is {test_acc}')
 
         self.history['testing_loss'] = test_mse
+        self.history['testing_accuracy'] = test_acc
+        
 
     
-
-    def get_effective_parameter_count(self):
-        ''' considers parameter count during training when drop out is applied as well'''
-        total_num_params = self.encoder.count_params()
-
-        num_dense_connections = self.temporal_conv_output_shape[0] * self.temporal_conv_output_shape[1]*8
-        print(num_dense_connections)
-        
-
-        return num_param_dropout
-        
     
     #Only doing this for test data
     def show_random_reconstruction(self,show_noise=False):
@@ -472,14 +518,7 @@ class ConvolutionalAutoEncoder:
 
         axs_noise_hist[1].hist(removed_noise_C4,bins=15)
 
-    def get_training_points_per_param(self):
-        num_encoder_params = self.get_effective_parameter_count()
-        num_decoder_params = floor((1-self.TRAINING_SETTINGS['DROPOUT_RATE']) * self.decoder.count_params())
-        total_params = num_encoder_params + num_decoder_params 
 
-        param_training_example_ratio = len(self.training_trials) / total_params
-
-        print(f'For each model parameter, there are {param_training_example_ratio} training examples when considering drop out during training')
         
 
         

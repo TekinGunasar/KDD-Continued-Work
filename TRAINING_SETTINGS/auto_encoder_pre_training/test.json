@@ -11,7 +11,7 @@
     "DROPOUT_RATE": 0.8,
     "STRIDE_LENGTH": 2,
     "BATCH_SIZE":128,
-    "NUM_EPOCHS":100,
+    "NUM_EPOCHS":30,
     "CLIP_GRADIENTS":"False"
   }
 }

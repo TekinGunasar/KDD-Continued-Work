@@ -5,7 +5,6 @@ from sklearn.preprocessing import LabelEncoder,StandardScaler
 from sklearn.metrics import accuracy_score
 from sklearn.cluster import KMeans
 
-from src.models.CAE import ConvolutionalAutoEncoder
 from src.preprocessing import *
 from src.dataset_wrappers import *
 from random import randrange
@@ -86,7 +85,6 @@ class DeepEmbeddedClustering():
         self.encoder.build(input_shape = input_shape)
 
 
-    
     def get_embeddings(self,x_batch,verbose=False):
         if x_batch.ndim == 2:
             if verbose:
@@ -107,11 +105,9 @@ class DeepEmbeddedClustering():
 
         return self.encoder(x_batch)
 
-    
     def initialize_cluster_centers(self,embedded_data):
         self.cluster_centers =  tf.cast(tf.Variable(KMeans(n_clusters=2).fit(embedded_data).cluster_centers_),tf.float32)
         
-    
     def compile_encoder(self,loss,optimizer):
         self.loss = loss
         self.optimizer = optimizer
@@ -120,14 +116,14 @@ class DeepEmbeddedClustering():
         self.encoder.compile(loss = self.loss,optimizer = self.optimizer)
 
     
-
+    
     def soft_assignments(self,embedded_data, cluster_centers, alpha=1):
         # Calculate pairwise distances between embedded data and cluster centers
         pairwise_distances = tf.reduce_sum(tf.square(embedded_data[:, tf.newaxis] - cluster_centers), axis=-1)
     
         # Compute the t-distribution kernel
         kernel = tf.pow(1 + pairwise_distances / alpha, -(alpha + 1) / 2)
-        kernel = kernel / (tf.reduce_sum(kernel, axis=-1, keepdims=True) - kernel)
+        kernel = kernel / (tf.reduce_sum(kernel, axis=-1, keepdims=True))
     
         return kernel
 
@@ -172,12 +168,12 @@ class DeepEmbeddedClustering():
         return val_kld
 
     def evaluate_training_accuracy(self):
-        training_embeddings = self.get_embeddings(self.training_trials)
+        training_embeddings = self.get_embeddings(self.testing_trials)
         
         soft_assignments = self.soft_assignments(training_embeddings,self.cluster_centers)
         target_distribution = self.target_distribution(soft_assignments)
         
-        train_acc = self.get_acc_by_cm(training_embeddings,self.cluster_centers,self.training_labels)
+        train_acc = self.get_acc_by_cm(training_embeddings,self.cluster_centers,self.testing_labels)
         
         return train_acc
 
@@ -209,10 +205,17 @@ class DeepEmbeddedClustering():
         grad_cluster_centers = tape.gradient(loss,self.cluster_centers)
 
         self.optimizer.apply_gradients(zip(grad_encoder_params,self.encoder.trainable_weights))
-        self.cluster_centers -= self.optimizer.lr * self.cluster_centers
+        self.cluster_centers += self.optimizer.lr * self.cluster_centers
         
             
     def train(self,save_experiment = False,model_name = None):
+
+        initial_training_acc = self.evaluate_training_accuracy()
+        initial_validation_acc = self.evaluate_validation_accuracy()
+
+        print(f'Initial training accuracy (by soft assignments): {initial_training_acc}')
+        print(f'Initial validation accuracy (by soft assignments): {initial_validation_acc}\n')
+
         
         train_trials_as_tf_dataset = create_tf_dataset(
             trials = self.training_trials,
@@ -246,15 +249,15 @@ class DeepEmbeddedClustering():
 
             train_acc = self.evaluate_training_accuracy()
             self.history['accuracy']['training'].append(train_acc)
-
+        
             val_acc = self.evaluate_validation_accuracy()
-            self.history['accuracy']['validation'].append(train_acc)
+            self.history['accuracy']['validation']
             
             print(f'Training loss: {train_loss}')
             print(f'Validation loss: {validation_loss}\n')
 
-            print(f'Training accuracy: {train_acc}')
-            print(f'Validation accuracy: {val_acc}')
+            print(f'Training accuracy (by soft assignments): {train_acc}')
+            print(f'Validation accuracy (by soft assignments): {val_acc}')
 
         self.plot_metrics()
 
@@ -282,7 +285,7 @@ class DeepEmbeddedClustering():
         axs[1].set_xlabel('Epoch')
         axs[1].set_ylabel('Accuracy')
 
-        axs[1].legend(['Training','Validation'])
+        axs[1].legend(['Training','Accuracy'])
 
         
 
