@@ -76,7 +76,7 @@ class DeepEmbeddedClustering():
 
     
     def extract_encoder(self):
-        encoder_idx = len(self.auto_encoder.layers) // 2 + 1
+        encoder_idx = 10
         encoder_layers = self.auto_encoder.layers[:encoder_idx]
         
         self.encoder = Sequential(encoder_layers)
