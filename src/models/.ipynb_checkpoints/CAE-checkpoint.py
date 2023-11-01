@@ -119,10 +119,7 @@ class ConvolutionalAutoEncoder:
             filters = self.TRAINING_SETTINGS['NUM_INITIAL_KERNELS'],
             kernel_size = (self.DATA_FORMAT['NUM_CHANNELS'],self.TRAINING_SETTINGS['KERNEL_WIDTH']),
             strides = (stride_length,stride_length),
-            activation= 'relu'
         ))
-
-        self.encoder.add(BatchNormalization())
 
         self.spatial_conv_output_shape = (
                 (floor((self.DATA_FORMAT['TRIAL_LENGTH'] - self.TRAINING_SETTINGS['KERNEL_WIDTH']) / stride_length)+1),
@@ -130,8 +127,8 @@ class ConvolutionalAutoEncoder:
         )
         
         self.encoder.add(Reshape(target_shape =  self.spatial_conv_output_shape))
-        self.encoder.add(LeakyReLU())
 
+        self.encoder.add(LeakyReLU())
        
         #spatial conv layers - end
 
@@ -145,7 +142,6 @@ class ConvolutionalAutoEncoder:
             activation = 'relu'
         ))
 
-        self.encoder.add(BatchNormalization())
 
         self.temporal_conv_output_shape = (
             (floor((self.spatial_conv_output_shape[0] - self.TRAINING_SETTINGS['KERNEL_WIDTH']) / stride_length) + 1),
@@ -160,7 +156,6 @@ class ConvolutionalAutoEncoder:
         self.encoder.add(Flatten())
         self.encoder.add(Dense(self.TRAINING_SETTINGS['LATENT_DIMS'],activation='tanh'))
 
-        self.encoder.add(BatchNormalization())
         
         #Fully connected layer - end
 
